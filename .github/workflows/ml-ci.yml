@@ -30,6 +30,8 @@ jobs:
         run: python -m unittest test_ml_pipeline -v
       - name: Run Flask API tests
         run: python -m unittest test_app -v
+      - name: Run FastAPI logging and validation tests
+        run: python -m unittest test_fastapi -v
       - name: Upload ML artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -43,7 +45,7 @@ jobs:
       - name: Prepare release candidate
         run: |
           mkdir -p release_candidate
-          cp app.py student_result_model.pkl metrics.json requirements.txt Dockerfile .dockerignore release_candidate/
+          cp app.py student_result_model.pkl metrics.json requirements.txt Dockerfile .dockerignore render.yaml test_fastapi.py release_candidate/
           cp -r deployment release_candidate/
       - name: Upload release candidate
         uses: actions/upload-artifact@v7
@@ -69,47 +71,81 @@ jobs:
           python-version: "3.11"
       - name: Install ML dependencies
         run: pip install -r requirements.txt
-      - name: Train model for container
+      - name: Train model for containers
         run: python train_model.py
-      - name: Build Docker image
-        run: docker build -t student-result-ml-ci:ci .
-      - name: Start Docker container
-        run: docker run -d --name student-result-ci -p 5000:5000 student-result-ml-ci:ci
-      - name: Wait for Flask API health endpoint
+
+      - name: Build Flask Docker image
+        run: docker build -t student-result-ml-ci:flask .
+      - name: Start Flask container
+        run: docker run -d --name student-result-flask -p 5000:5000 student-result-ml-ci:flask
+      - name: Smoke-test Flask API
         run: |
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://localhost:5000/health; then
-              echo "Container health check passed"
-              exit 0
+              echo "Flask health check passed"
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs student-result-flask
+              exit 1
             fi
             sleep 1
           done
-          docker logs student-result-ci
-          echo "Container did not become healthy"
-          exit 1
-      - name: Test prediction endpoint
-        run: |
           response=$(curl --fail --silent --show-error -X POST http://localhost:5000/predict             -H "Content-Type: application/json"             --data '{"attendance":90,"internal_marks":85,"assignment_marks":88,"previous_score":80}')
           echo "$response"
           echo "$response" | grep -q '"prediction"'
-      - name: Capture container logs
+      - name: Capture Flask container logs
         if: always()
-        run: docker logs student-result-ci || true
-      - name: Clean up container
+        run: docker logs student-result-flask || true
+      - name: Clean up Flask container
         if: always()
-        run: docker rm -f student-result-ci || true
-      - name: Log in to GHCR
+        run: docker rm -f student-result-flask || true
+
+      - name: Build FastAPI Docker image
+        run: docker build -f deployment/fastapi/Dockerfile -t student-result-ml-ci:fastapi .
+      - name: Start FastAPI container
+        run: docker run -d --name student-result-fastapi -p 8000:8000 student-result-ml-ci:fastapi
+      - name: Smoke-test FastAPI logging service
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8000/health; then
+              echo "FastAPI health check passed"
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs student-result-fastapi
+              exit 1
+            fi
+            sleep 1
+          done
+          response=$(curl --fail --silent --show-error -X POST http://localhost:8000/predict             -H "Content-Type: application/json"             --data '{"attendance":90,"internal_marks":85,"assignment_marks":88,"previous_score":80}')
+          echo "$response"
+          echo "$response" | grep -q '"prediction"'
+      - name: Capture FastAPI container logs
+        if: always()
+        run: docker logs student-result-fastapi || true
+      - name: Clean up FastAPI container
+        if: always()
+        run: docker rm -f student-result-fastapi || true
+
+      - name: Log in to GitHub Container Registry
         if: success()
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Tag image
+      - name: Tag tested images
         if: success()
         run: |
-          IMAGE=ghcr.io/${{ github.repository_owner }}
-          docker tag student-result-ml-ci:ci "$IMAGE:latest"
-          docker tag student-result-ml-ci:ci "$IMAGE:sha-${{ github.sha }}"
-      - name: Publish image to GHCR
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/student-result-prediction"
+          docker tag student-result-ml-ci:flask "$IMAGE:flask"
+          docker tag student-result-ml-ci:flask "$IMAGE:flask-${GITHUB_SHA}"
+          docker tag student-result-ml-ci:fastapi "$IMAGE:latest"
+          docker tag student-result-ml-ci:fastapi "$IMAGE:sha-${GITHUB_SHA}"
+      - name: Publish tested images to GHCR
         if: success()
         run: |
-          IMAGE=ghcr.io/${{ github.repository_owner }}/student-result-prediction
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/$OWNER/student-result-prediction"
+          docker push "$IMAGE:flask"
+          docker push "$IMAGE:flask-${GITHUB_SHA}"
           docker push "$IMAGE:latest"
-          docker push "$IMAGE:sha-${{ github.sha }}"
+          docker push "$IMAGE:sha-${GITHUB_SHA}"
