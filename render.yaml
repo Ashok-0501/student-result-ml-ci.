@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: student-result-prediction
+    runtime: image
+    image:
+      url: ghcr.io/ashok-0501/student-result-prediction:latest
+    plan: free
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8000"
