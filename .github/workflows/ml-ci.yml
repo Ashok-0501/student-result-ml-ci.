@@ -104,7 +104,7 @@ jobs:
       - name: Tag image
         if: success()
         run: |
-          IMAGE=ghcr.io/${{ github.repository_owner }}/student-result-prediction
+          IMAGE=ghcr.io/${{ github.repository_owner }}
           docker tag student-result-ml-ci:ci "$IMAGE:latest"
           docker tag student-result-ml-ci:ci "$IMAGE:sha-${{ github.sha }}"
       - name: Publish image to GHCR
