@@ -1,4 +1,4 @@
-name: Student Result ML CI-CD
+name: Build, Test and Publish Student Result Prediction
 
 on:
   push:
@@ -16,35 +16,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.11"
-
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
-
-      - name: Install ML dependencies
+      - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Train student result model
         run: python train_model.py
-
       - name: Check ML quality gate
         run: python quality_gate.py
-
-      - name: Run automated ML tests
+      - name: Run ML tests
         run: python -m unittest test_ml_pipeline -v
-
-      - name: Run prediction API tests
+      - name: Run Flask API tests
         run: python -m unittest test_app -v
-
-      - name: Prepare release candidate
-        run: |
-          mkdir -p release_candidate
-          cp app.py student_result_model.pkl metrics.json requirements.txt Dockerfile .dockerignore release_candidate/
-
       - name: Upload ML artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -55,7 +40,11 @@ jobs:
             student_results.csv
           if-no-files-found: error
           retention-days: 7
-
+      - name: Prepare release candidate
+        run: |
+          mkdir -p release_candidate
+          cp app.py student_result_model.pkl metrics.json requirements.txt Dockerfile .dockerignore release_candidate/
+          cp -r deployment release_candidate/
       - name: Upload release candidate
         uses: actions/upload-artifact@v7
         with:
@@ -63,3 +52,64 @@ jobs:
           path: release_candidate/
           if-no-files-found: error
           retention-days: 7
+
+  docker-test-and-publish:
+    needs: train-and-test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install ML dependencies
+        run: pip install -r requirements.txt
+      - name: Train model for container
+        run: python train_model.py
+      - name: Build Docker image
+        run: docker build -t student-result-ml-ci:ci .
+      - name: Start Docker container
+        run: docker run -d --name student-result-ci -p 5000:5000 student-result-ml-ci:ci
+      - name: Wait for Flask API health endpoint
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:5000/health; then
+              echo "Container health check passed"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs student-result-ci
+          echo "Container did not become healthy"
+          exit 1
+      - name: Test prediction endpoint
+        run: |
+          response=$(curl --fail --silent --show-error -X POST http://localhost:5000/predict             -H "Content-Type: application/json"             --data '{"attendance":90,"internal_marks":85,"assignment_marks":88,"previous_score":80}')
+          echo "$response"
+          echo "$response" | grep -q '"prediction"'
+      - name: Capture container logs
+        if: always()
+        run: docker logs student-result-ci || true
+      - name: Clean up container
+        if: always()
+        run: docker rm -f student-result-ci || true
+      - name: Log in to GHCR
+        if: success()
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Tag image
+        if: success()
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/student-result-prediction
+          docker tag student-result-ml-ci:ci "$IMAGE:latest"
+          docker tag student-result-ml-ci:ci "$IMAGE:sha-${{ github.sha }}"
+      - name: Publish image to GHCR
+        if: success()
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/student-result-prediction
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:sha-${{ github.sha }}"
